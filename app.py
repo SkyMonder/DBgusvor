@@ -1,7 +1,8 @@
 import os
 import json
 from datetime import datetime
-from flask import Flask, request, jsonify
+from urllib.parse import unquote
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -9,14 +10,14 @@ CORS(app)
 
 DATA_FILE = "data.json"
 
-# ──────────────────────────────
-#  ИНИЦИАЛИЗАЦИЯ ДАННЫХ
-# ──────────────────────────────
+# ─────────────────────────────────────────────
+#  ПАРОЛИ ИЗ ENVIRONMENT VARIABLES
+# ─────────────────────────────────────────────
 DEFAULT_USERS = [
     {
         "id": 1,
         "name": "Арсений",
-        "password": os.environ.get("PASSWORD_ARSENIY"),   # ← локальный fallback
+        "password": os.environ.get("PASSWORD_ARSENIY"),
         "lives": 3,
         "isAdmin": False,
         "avatar": "☕"
@@ -61,7 +62,7 @@ DEFAULT_NEWS = [
         "title": "Добро пожаловать!",
         "content": "Это наша общая доска новостей. Здесь можно писать всё что угодно — анонсы, мемы, важные объявления. Редактировать может каждый!",
         "author": "Даня",
-        "date": "2026-05-18T19:00:00"
+        "date": "2026-05-18T20:00:00"
     }
 ]
 
@@ -84,17 +85,30 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# ──────────────────────────────
-#  API РОУТЫ
-# ──────────────────────────────
+# ─────────────────────────────────────────────
+#  РАЗДАЧА СТАТИКИ (фронтенд)
+# ─────────────────────────────────────────────
+@app.route("/")
+def serve_index():
+    return send_from_directory(".", "index.html")
 
-# Здоровье (для cron-job)
+
+@app.route("/<path:path>")
+def serve_static(path):
+    return send_from_directory(".", path)
+
+
+# ─────────────────────────────────────────────
+#  API: ЗДОРОВЬЕ
+# ─────────────────────────────────────────────
 @app.route("/ping")
 def ping():
     return "pong"
 
 
-# Авторизация
+# ─────────────────────────────────────────────
+#  API: АВТОРИЗАЦИЯ
+# ─────────────────────────────────────────────
 @app.route("/api/login", methods=["POST"])
 def login():
     body = request.json
@@ -104,7 +118,6 @@ def login():
     user = next((u for u in data["users"] if u["name"] == name), None)
     if not user or user["password"] != password:
         return jsonify({"error": "Неверное имя или пароль"}), 401
-    # Не возвращаем пароль
     return jsonify({
         "name": user["name"],
         "avatar": user["avatar"],
@@ -113,7 +126,9 @@ def login():
     })
 
 
-# Получить список жизней (все пользователи, но без паролей)
+# ─────────────────────────────────────────────
+#  API: ПОЛУЧИТЬ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ (без паролей)
+# ─────────────────────────────────────────────
 @app.route("/api/lives")
 def get_lives():
     data = load_data()
@@ -121,10 +136,13 @@ def get_lives():
     return jsonify(users)
 
 
-# Изменить жизни (только админ)
+# ─────────────────────────────────────────────
+#  API: ИЗМЕНИТЬ ЖИЗНИ (только админ)
+# ─────────────────────────────────────────────
 @app.route("/api/lives/<name>", methods=["PATCH"])
 def update_lives(name):
-    auth_name = request.headers.get("X-Auth-Name")
+    raw_auth = request.headers.get("X-Auth-Name", "")
+    auth_name = unquote(raw_auth) if raw_auth else ""
     if not auth_name:
         return jsonify({"error": "Не авторизован"}), 401
 
@@ -150,19 +168,23 @@ def update_lives(name):
     return jsonify({"name": user["name"], "lives": user["lives"]})
 
 
-# Новости: получить все
+# ─────────────────────────────────────────────
+#  API: ПОЛУЧИТЬ ВСЕ НОВОСТИ
+# ─────────────────────────────────────────────
 @app.route("/api/news")
 def get_news():
     data = load_data()
-    # Сортируем от новых к старым
     news = sorted(data["news"], key=lambda n: n["date"], reverse=True)
     return jsonify(news)
 
 
-# Добавить новость (любой авторизованный)
+# ─────────────────────────────────────────────
+#  API: ДОБАВИТЬ НОВОСТЬ
+# ─────────────────────────────────────────────
 @app.route("/api/news", methods=["POST"])
 def add_news():
-    auth_name = request.headers.get("X-Auth-Name")
+    raw_auth = request.headers.get("X-Auth-Name", "")
+    auth_name = unquote(raw_auth) if raw_auth else ""
     if not auth_name:
         return jsonify({"error": "Не авторизован"}), 401
 
@@ -187,10 +209,13 @@ def add_news():
     return jsonify(news_item), 201
 
 
-# Редактировать новость
+# ─────────────────────────────────────────────
+#  API: РЕДАКТИРОВАТЬ НОВОСТЬ
+# ─────────────────────────────────────────────
 @app.route("/api/news/<int:news_id>", methods=["PUT"])
 def edit_news(news_id):
-    auth_name = request.headers.get("X-Auth-Name")
+    raw_auth = request.headers.get("X-Auth-Name", "")
+    auth_name = unquote(raw_auth) if raw_auth else ""
     if not auth_name:
         return jsonify({"error": "Не авторизован"}), 401
 
@@ -207,15 +232,18 @@ def edit_news(news_id):
 
     item["title"] = title
     item["content"] = content
-    item["date"] = datetime.utcnow().isoformat()  # обновляем дату
+    item["date"] = datetime.utcnow().isoformat()
     save_data(data)
     return jsonify(item)
 
 
-# Удалить новость
+# ─────────────────────────────────────────────
+#  API: УДАЛИТЬ НОВОСТЬ
+# ─────────────────────────────────────────────
 @app.route("/api/news/<int:news_id>", methods=["DELETE"])
 def delete_news(news_id):
-    auth_name = request.headers.get("X-Auth-Name")
+    raw_auth = request.headers.get("X-Auth-Name", "")
+    auth_name = unquote(raw_auth) if raw_auth else ""
     if not auth_name:
         return jsonify({"error": "Не авторизован"}), 401
 
@@ -229,9 +257,9 @@ def delete_news(news_id):
     return jsonify({"ok": True})
 
 
-# ──────────────────────────────
-#  ЗАПУСК (локально или на Render)
-# ──────────────────────────────
+# ─────────────────────────────────────────────
+#  ЗАПУСК
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
