@@ -13,11 +13,46 @@ DATA_FILE = "data.json"
 #  ИНИЦИАЛИЗАЦИЯ ДАННЫХ
 # ──────────────────────────────
 DEFAULT_USERS = [
-    {"id": 1, "name": "Арсений", "password": "ars2024", "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 2, "name": "Алекса",   "password": "alexa2024", "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 3, "name": "Даня",     "password": "danya2024", "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 4, "name": "Петя",     "password": "petya2024", "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 5, "name": "Тася",     "password": "tasya2024", "lives": 3, "isAdmin": True,  "avatar": "☕"},
+    {
+        "id": 1,
+        "name": "Арсений",
+        "password": os.environ.get("PASSWORD_ARSENIY"),   # ← локальный fallback
+        "lives": 3,
+        "isAdmin": False,
+        "avatar": "☕"
+    },
+    {
+        "id": 2,
+        "name": "Алекса",
+        "password": os.environ.get("PASSWORD_ALEKSA"),
+        "lives": 3,
+        "isAdmin": False,
+        "avatar": "☕"
+    },
+    {
+        "id": 3,
+        "name": "Даня",
+        "password": os.environ.get("PASSWORD_DANYA"),
+        "lives": 3,
+        "isAdmin": False,
+        "avatar": "☕"
+    },
+    {
+        "id": 4,
+        "name": "Петя",
+        "password": os.environ.get("PASSWORD_PETYA"),
+        "lives": 3,
+        "isAdmin": False,
+        "avatar": "☕"
+    },
+    {
+        "id": 5,
+        "name": "Тася",
+        "password": os.environ.get("PASSWORD_TASYA"),
+        "lives": 3,
+        "isAdmin": True,
+        "avatar": "☕"
+    },
 ]
 
 DEFAULT_NEWS = [
