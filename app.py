@@ -1,6 +1,7 @@
 import os
 import json
 import secrets
+import hashlib
 import time
 from datetime import datetime, timedelta
 from functools import wraps
@@ -15,7 +16,7 @@ TOKEN_EXPIRY_HOURS = 1
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX_REQUESTS = 10
 MAX_FAILED_LOGINS = 5
-BAN_TIME = 15 * 60  # 15 минут бана
+BAN_TIME = 15 * 60
 
 ALLOWED_ORIGINS = {
     "https://gusasya-vorobeychiky.onrender.com",
@@ -24,7 +25,6 @@ ALLOWED_ORIGINS = {
 }
 
 DEFAULT_USERS = [
-    {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY", "ars2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA", "alexa2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA", "danya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA", "petya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
@@ -40,17 +40,37 @@ rate_limit_cache = {}
 failed_logins = {}
 banned_ips = {}
 
-def get_real_ip():
-    """На Render реальный IP приходит в X-Forwarded-For"""
-    return request.headers.get('X-Forwarded-For', request.remote_addr)
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+    h = hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
+    return salt, h
+
+def verify_password(password, salt, password_hash):
+    return hashlib.sha256((salt + password).encode('utf-8')).hexdigest() == password_hash
+
+def migrate_user_passwords(users):
+    changed = False
+    for user in users:
+        if "password" in user and "password_hash" not in user:
+            salt, p_hash = hash_password(user["password"])
+            user["salt"] = salt
+            user["password_hash"] = p_hash
+            del user["password"]
+            changed = True
+    return changed
 
 def load_data():
     if not os.path.exists(DATA_FILE):
         data = {"users": DEFAULT_USERS, "news": DEFAULT_NEWS, "nextNewsId": 2, "tokens": {}}
+        migrate_user_passwords(data["users"])
         save_data(data)
         return data
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if migrate_user_passwords(data["users"]):
+        save_data(data)
+    return data
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -85,12 +105,7 @@ def save_tokens():
 def generate_token(name, ip, user_agent):
     token = secrets.token_hex(32)
     expires = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRY_HOURS)
-    active_tokens[token] = {
-        "name": name,
-        "expires": expires,
-        "ip": ip,
-        "user_agent": user_agent
-    }
+    active_tokens[token] = {"name": name, "expires": expires, "ip": ip, "user_agent": user_agent}
     save_tokens()
     return token
 
@@ -98,9 +113,7 @@ def get_user_by_token(token):
     info = active_tokens.get(token)
     if not info or info["expires"] < datetime.utcnow():
         return None
-    # Сравниваем реальный IP и User-Agent
     if get_real_ip() != info.get("ip") or request.headers.get("User-Agent") != info.get("user_agent"):
-        # Удаляем невалидный токен
         del active_tokens[token]
         save_tokens()
         return None
@@ -108,6 +121,9 @@ def get_user_by_token(token):
 
 def generate_csrf_token():
     return secrets.token_hex(32)
+
+def get_real_ip():
+    return request.headers.get('X-Forwarded-For', request.remote_addr)
 
 def check_origin():
     origin = request.headers.get("Origin") or request.headers.get("Referer")
@@ -130,7 +146,7 @@ def is_banned():
         if time.time() - banned_ips[ip] < BAN_TIME:
             return True
         else:
-            del banned_ips[ip]  # разбан
+            del banned_ips[ip]
     return False
 
 def require_origin(f):
@@ -182,7 +198,7 @@ def require_csrf(f):
 
 @app.after_request
 def add_security_headers(response):
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     return response
@@ -208,8 +224,7 @@ def ping():
 def login():
     ip = get_real_ip()
     if is_banned():
-        return jsonify({"error": "Вы заблокированы на 15 минут за подбор пароля"}), 429
-
+        return jsonify({"error": "Заблокированы"}), 429
     if rate_limit("login"):
         return jsonify({"error": "Слишком много попыток"}), 429
 
@@ -222,27 +237,28 @@ def login():
 
     data = load_data()
     user = next((u for u in data["users"] if u["name"] == name), None)
-    if not user or user["password"] != password:
-        # Увеличиваем счётчик неудачных попыток
-        failed_logins.setdefault(ip, {"count": 0, "first_attempt": time.time()})
-        failed_logins[ip]["count"] += 1
-        if failed_logins[ip]["count"] >= MAX_FAILED_LOGINS:
-            banned_ips[ip] = time.time()
-            failed_logins.pop(ip, None)
-            return jsonify({"error": "Слишком много неверных попыток. Заблокированы на 15 минут"}), 429
+    if not user:
         return jsonify({"error": "Неверное имя или пароль"}), 401
 
-    # Успешный вход — сбрасываем счётчик
-    failed_logins.pop(ip, None)
+    if "password_hash" in user:
+        if not verify_password(password, user.get("salt", ""), user["password_hash"]):
+            failed_logins.setdefault(ip, {"count": 0, "first_attempt": time.time()})
+            failed_logins[ip]["count"] += 1
+            if failed_logins[ip]["count"] >= MAX_FAILED_LOGINS:
+                banned_ips[ip] = time.time()
+                failed_logins.pop(ip, None)
+                return jsonify({"error": "Слишком много неверных попыток. Заблокированы"}), 429
+            return jsonify({"error": "Неверное имя или пароль"}), 401
+    else:
+        if user.get("password") != password:
+            return jsonify({"error": "Неверное имя или пароль"}), 401
 
+    failed_logins.pop(ip, None)
     token = generate_token(user["name"], ip, request.headers.get("User-Agent", ""))
     csrf = generate_csrf_token()
 
     resp = make_response(jsonify({
-        "name": user["name"],
-        "avatar": user["avatar"],
-        "isAdmin": user["isAdmin"],
-        "lives": user["lives"],
+        "name": user["name"], "avatar": user["avatar"], "isAdmin": user["isAdmin"], "lives": user["lives"],
         "csrf_token": csrf
     }))
     resp.set_cookie("auth_token", value=token, max_age=TOKEN_EXPIRY_HOURS*3600,
@@ -300,12 +316,7 @@ def me():
     user = next((u for u in data["users"] if u["name"] == request.current_user), None)
     if not user:
         return jsonify({"error": "Пользователь не найден"}), 404
-    return jsonify({
-        "name": user["name"],
-        "avatar": user["avatar"],
-        "isAdmin": user["isAdmin"],
-        "lives": user["lives"]
-    })
+    return jsonify({"name": user["name"], "avatar": user["avatar"], "isAdmin": user["isAdmin"], "lives": user["lives"]})
 
 @app.route("/api/news")
 @require_auth
@@ -328,11 +339,8 @@ def add_news():
     data = load_data()
     new_id = data["nextNewsId"]
     news_item = {
-        "id": new_id,
-        "title": title,
-        "content": content,
-        "author": request.current_user,
-        "date": datetime.utcnow().isoformat()
+        "id": new_id, "title": title, "content": content,
+        "author": request.current_user, "date": datetime.utcnow().isoformat()
     }
     data["news"].append(news_item)
     data["nextNewsId"] = new_id + 1
@@ -370,7 +378,6 @@ def delete_news(news_id):
     save_data(data)
     return jsonify({"ok": True})
 
-# Экстренный сброс сессий
 EMERGENCY_RESET_KEY = os.environ.get("EMERGENCY_RESET_KEY", "change-me-emergency")
 @app.route("/emergency-reset")
 def emergency_reset():
@@ -380,7 +387,7 @@ def emergency_reset():
     data = load_data()
     data["tokens"] = {}
     save_data(data)
-    return "All sessions destroyed. Go deploy the fixed code.", 200
+    return "All sessions destroyed.", 200
 
 if __name__ == "__main__":
     load_tokens()
