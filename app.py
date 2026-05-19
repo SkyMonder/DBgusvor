@@ -24,7 +24,6 @@ ALLOWED_ORIGINS = {
     "http://localhost:5000"
 }
 
-# Все участники, включая Арсения
 DEFAULT_USERS = [
     {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY", "ars2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA", "alexa2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
@@ -115,7 +114,8 @@ def get_user_by_token(token):
     info = active_tokens.get(token)
     if not info or info["expires"] < datetime.utcnow():
         return None
-    if get_real_ip() != info.get("ip") or request.headers.get("User-Agent") != info.get("user_agent"):
+    # Проверяем только User-Agent (IP ненадёжен из-за прокси Render)
+    if request.headers.get("User-Agent") != info.get("user_agent"):
         del active_tokens[token]
         save_tokens()
         return None
