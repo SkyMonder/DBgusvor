@@ -15,10 +15,11 @@ TOKEN_EXPIRY_HOURS = 24
 RATE_LIMIT_WINDOW = 60          # секунд
 RATE_LIMIT_MAX_REQUESTS = 10    # запросов за окно
 
-# Разрешённые домены (укажи свои реальные)
+# Разрешённые домены (добавь свои реальные)
 ALLOWED_ORIGINS = {
     "https://gusasya-vorobeychiky.onrender.com",
     "https://dbgusvor.onrender.com",
+    "http://localhost:5000"
 }
 
 # ─────────────────────────────────────────────
@@ -33,7 +34,7 @@ DEFAULT_USERS = [
 ]
 
 DEFAULT_NEWS = [
-    {"id": 1, "title": "Добро пожаловать!", "content": "Это наша общая доска новостей. Здесь можно писать всё что угодно — анонсы, мемы, важные объявления. Редактировать может каждый!", "author": "Тася", "date": "2026-05-19T12:00:00"}
+    {"id": 1, "title": "Добро пожаловать!", "content": "Это наша общая доска новостей. Здесь можно писать всё что угодно — анонсы, мемы, важные объявления. Редактировать может каждый!", "author": "Тася", "date": "2024-01-15T12:00:00"}
 ]
 
 # ─────────────────────────────────────────────
@@ -185,6 +186,10 @@ def serve_index():
 @app.route("/index.html")
 def serve_index_explicit():
     return send_from_directory(".", "index.html")
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
 
 # ─────────────────────────────────────────────
 #  API: ЗДОРОВЬЕ (для cron-job)
