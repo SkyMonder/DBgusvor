@@ -18,19 +18,18 @@ RATE_LIMIT_MAX_REQUESTS = 10
 # Разрешённые домены (добавь свои реальные)
 ALLOWED_ORIGINS = {
     "https://gusasya-vorobeychiky.onrender.com",
-    "https://dbgusvor.onrender.com",
-    "http://localhost:5000"
+    "https://dbgusvor.onrender.com"
 }
 
 # ─────────────────────────────────────────────
 #  ПАРОЛИ ИЗ ENVIRONMENT
 # ─────────────────────────────────────────────
 DEFAULT_USERS = [
-    {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY", "ars2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA", "alexa2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA", "danya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA", "petya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 5, "name": "Тася",     "password": os.environ.get("PASSWORD_TASYA", "tasya2024"), "lives": 3, "isAdmin": True,  "avatar": "☕"},
+    {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 5, "name": "Тася",     "password": os.environ.get("PASSWORD_TASYA"), "lives": 3, "isAdmin": True,  "avatar": "☕"},
 ]
 
 DEFAULT_NEWS = [
