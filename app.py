@@ -24,7 +24,9 @@ ALLOWED_ORIGINS = {
     "http://localhost:5000"
 }
 
+# Все участники, включая Арсения
 DEFAULT_USERS = [
+    {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY", "ars2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA", "alexa2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA", "danya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
     {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA", "petya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
