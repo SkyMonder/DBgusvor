@@ -11,9 +11,11 @@ app = Flask(__name__)
 CORS(app, supports_credentials=True)
 
 DATA_FILE = "data.json"
-TOKEN_EXPIRY_HOURS = 1          # 1 час
+TOKEN_EXPIRY_HOURS = 1
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX_REQUESTS = 10
+MAX_FAILED_LOGINS = 5
+BAN_TIME = 15 * 60  # 15 минут бана
 
 ALLOWED_ORIGINS = {
     "https://gusasya-vorobeychiky.onrender.com",
@@ -35,6 +37,12 @@ DEFAULT_NEWS = [
 
 active_tokens = {}
 rate_limit_cache = {}
+failed_logins = {}
+banned_ips = {}
+
+def get_real_ip():
+    """На Render реальный IP приходит в X-Forwarded-For"""
+    return request.headers.get('X-Forwarded-For', request.remote_addr)
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -90,7 +98,9 @@ def get_user_by_token(token):
     info = active_tokens.get(token)
     if not info or info["expires"] < datetime.utcnow():
         return None
-    if request.remote_addr != info.get("ip") or request.headers.get("User-Agent") != info.get("user_agent"):
+    # Сравниваем реальный IP и User-Agent
+    if get_real_ip() != info.get("ip") or request.headers.get("User-Agent") != info.get("user_agent"):
+        # Удаляем невалидный токен
         del active_tokens[token]
         save_tokens()
         return None
@@ -107,12 +117,21 @@ def check_origin():
     return origin in ALLOWED_ORIGINS
 
 def rate_limit(endpoint):
-    key = f"{request.remote_addr}:{endpoint}"
+    key = f"{get_real_ip()}:{endpoint}"
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
     rate_limit_cache.setdefault(key, []).append(now)
     rate_limit_cache[key] = [t for t in rate_limit_cache[key] if t > window_start]
     return len(rate_limit_cache[key]) > RATE_LIMIT_MAX_REQUESTS
+
+def is_banned():
+    ip = get_real_ip()
+    if ip in banned_ips:
+        if time.time() - banned_ips[ip] < BAN_TIME:
+            return True
+        else:
+            del banned_ips[ip]  # разбан
+    return False
 
 def require_origin(f):
     @wraps(f)
@@ -187,19 +206,38 @@ def ping():
 @app.route("/api/login", methods=["POST"])
 @require_origin
 def login():
+    ip = get_real_ip()
+    if is_banned():
+        return jsonify({"error": "Вы заблокированы на 15 минут за подбор пароля"}), 429
+
     if rate_limit("login"):
         return jsonify({"error": "Слишком много попыток"}), 429
+
     body = request.json
     name = body.get("name", "").strip()
     password = body.get("password", "")
+
     if not name or not password:
         return jsonify({"error": "Имя и пароль обязательны"}), 400
+
     data = load_data()
     user = next((u for u in data["users"] if u["name"] == name), None)
     if not user or user["password"] != password:
+        # Увеличиваем счётчик неудачных попыток
+        failed_logins.setdefault(ip, {"count": 0, "first_attempt": time.time()})
+        failed_logins[ip]["count"] += 1
+        if failed_logins[ip]["count"] >= MAX_FAILED_LOGINS:
+            banned_ips[ip] = time.time()
+            failed_logins.pop(ip, None)
+            return jsonify({"error": "Слишком много неверных попыток. Заблокированы на 15 минут"}), 429
         return jsonify({"error": "Неверное имя или пароль"}), 401
-    token = generate_token(user["name"], request.remote_addr, request.headers.get("User-Agent", ""))
+
+    # Успешный вход — сбрасываем счётчик
+    failed_logins.pop(ip, None)
+
+    token = generate_token(user["name"], ip, request.headers.get("User-Agent", ""))
     csrf = generate_csrf_token()
+
     resp = make_response(jsonify({
         "name": user["name"],
         "avatar": user["avatar"],
@@ -342,7 +380,7 @@ def emergency_reset():
     data = load_data()
     data["tokens"] = {}
     save_data(data)
-    return "All sessions destroyed. You pwned the hacker.", 200
+    return "All sessions destroyed. Go deploy the fixed code.", 200
 
 if __name__ == "__main__":
     load_tokens()
