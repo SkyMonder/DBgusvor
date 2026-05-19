@@ -1,395 +1,659 @@
-import os
-import json
-import secrets
-import hashlib
-import time
-from datetime import datetime, timedelta
-from functools import wraps
-from flask import Flask, request, jsonify, send_from_directory, make_response
-from flask_cors import CORS
-
-app = Flask(__name__)
-CORS(app, supports_credentials=True)
-
-DATA_FILE = "data.json"
-TOKEN_EXPIRY_HOURS = 1
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_MAX_REQUESTS = 10
-MAX_FAILED_LOGINS = 5
-BAN_TIME = 15 * 60
-
-ALLOWED_ORIGINS = {
-    "https://gusasya-vorobeychiky.onrender.com",
-    "https://dbgusvor.onrender.com",
-    "http://localhost:5000"
-}
-
-DEFAULT_USERS = [
-    {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA", "alexa2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA", "danya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA", "petya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 5, "name": "Тася",     "password": os.environ.get("PASSWORD_TASYA", "tasya2024"), "lives": 3, "isAdmin": True,  "avatar": "☕"},
-]
-
-DEFAULT_NEWS = [
-    {"id": 1, "title": "Добро пожаловать!", "content": "Это наша общая доска новостей...", "author": "Тася", "date": "2024-01-15T12:00:00"}
-]
-
-active_tokens = {}
-rate_limit_cache = {}
-failed_logins = {}
-banned_ips = {}
-
-def hash_password(password, salt=None):
-    if salt is None:
-        salt = secrets.token_hex(16)
-    h = hashlib.sha256((salt + password).encode('utf-8')).hexdigest()
-    return salt, h
-
-def verify_password(password, salt, password_hash):
-    return hashlib.sha256((salt + password).encode('utf-8')).hexdigest() == password_hash
-
-def migrate_user_passwords(users):
-    changed = False
-    for user in users:
-        if "password" in user and "password_hash" not in user:
-            salt, p_hash = hash_password(user["password"])
-            user["salt"] = salt
-            user["password_hash"] = p_hash
-            del user["password"]
-            changed = True
-    return changed
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        data = {"users": DEFAULT_USERS, "news": DEFAULT_NEWS, "nextNewsId": 2, "tokens": {}}
-        migrate_user_passwords(data["users"])
-        save_data(data)
-        return data
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if migrate_user_passwords(data["users"]):
-        save_data(data)
-    return data
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_tokens():
-    data = load_data()
-    for token, info in data.get("tokens", {}).items():
-        if "expires" in info:
-            info["expires"] = datetime.fromisoformat(info["expires"])
-        active_tokens[token] = info
-    now = datetime.utcnow()
-    expired = [t for t, v in active_tokens.items() if v["expires"] < now]
-    for t in expired:
-        del active_tokens[t]
-    if expired:
-        save_tokens()
-
-def save_tokens():
-    data = load_data()
-    serializable = {}
-    for token, info in active_tokens.items():
-        serializable[token] = {
-            "name": info["name"],
-            "expires": info["expires"].isoformat(),
-            "ip": info.get("ip"),
-            "user_agent": info.get("user_agent")
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Гусяси Воробейчики 🦆🐦</title>
+    <style>
+        :root {
+            --bg: #fdf6ed;
+            --card-bg: #ffffff;
+            --primary: #e8983e;
+            --primary-dark: #c47a2a;
+            --accent: #d4a574;
+            --text: #3d2c1e;
+            --text-light: #6b5a4a;
+            --danger: #d95454;
+            --danger-hover: #b84040;
+            --success: #6b9e5a;
+            --border: #e8d5c0;
+            --shadow: 0 4px 20px rgba(120, 80, 40, 0.08);
+            --shadow-lg: 0 8px 40px rgba(120, 80, 40, 0.14);
+            --radius: 18px;
+            --radius-sm: 10px;
+            --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
         }
-    data["tokens"] = serializable
-    save_data(data)
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            background-image: radial-gradient(ellipse at 50% 0%, rgba(232, 152, 62, 0.06) 0%, transparent 70%),
+                radial-gradient(ellipse at 85% 100%, rgba(180, 130, 90, 0.05) 0%, transparent 60%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text);
+            padding: 20px;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+        }
+        /* Login */
+        .login-overlay {
+            position: fixed; inset: 0;
+            background: var(--bg);
+            background-image: radial-gradient(ellipse at 50% 30%, rgba(232, 152, 62, 0.1) 0%, transparent 70%),
+                radial-gradient(ellipse at 20% 80%, rgba(180, 130, 90, 0.06) 0%, transparent 60%);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 1000; transition: opacity 0.5s ease, visibility 0.5s ease;
+        }
+        .login-overlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        .login-card {
+            background: var(--card-bg); border-radius: 24px; padding: 40px 32px 32px;
+            box-shadow: var(--shadow-lg); text-align: center; width: 100%; max-width: 420px;
+            animation: floatIn 0.6s ease-out;
+        }
+        @keyframes floatIn {
+            from { opacity: 0; transform: translateY(30px) scale(0.96); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .login-logo { font-size: 56px; margin-bottom: 6px; animation: bounce 1.2s ease-in-out infinite; display: inline-block; }
+        @keyframes bounce {
+            0%,100% { transform: translateY(0); }
+            30% { transform: translateY(-16px); }
+            50% { transform: translateY(0); }
+            70% { transform: translateY(-8px); }
+            85% { transform: translateY(0); }
+        }
+        .login-title { font-size: 26px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 4px; }
+        .login-subtitle { font-size: 14px; color: var(--text-light); margin-bottom: 28px; }
+        .login-select {
+            width: 100%; padding: 14px 16px; border-radius: var(--radius-sm); border: 2px solid var(--border);
+            background: #fefaf5; font-size: 16px; font-family: var(--font); color: var(--text);
+            cursor: pointer; transition: var(--transition); appearance: none; -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b5a4a' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 16px center;
+            margin-bottom: 14px; outline: none;
+        }
+        .login-select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(232,152,62,0.1); }
+        .login-input {
+            width: 100%; padding: 14px 16px; border-radius: var(--radius-sm); border: 2px solid var(--border);
+            background: #fefaf5; font-size: 16px; font-family: var(--font); color: var(--text);
+            transition: var(--transition); margin-bottom: 20px; outline: none; letter-spacing: 1px;
+        }
+        .login-input:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(232,152,62,0.1); }
+        .login-input::placeholder { color: #c4b8a8; letter-spacing: 0; }
+        .btn {
+            padding: 13px 28px; border-radius: 50px; border: none; font-size: 16px; font-weight: 700;
+            cursor: pointer; font-family: var(--font); transition: var(--transition); letter-spacing: 0.2px;
+            display: inline-flex; align-items: center; gap: 8px; justify-content: center;
+        }
+        .btn-primary { background: var(--primary); color: #fff; width: 100%; box-shadow: 0 4px 16px rgba(232,152,62,0.3); }
+        .btn-primary:hover { background: var(--primary-dark); box-shadow: 0 6px 24px rgba(232,152,62,0.4); transform: translateY(-1px); }
+        .btn-primary:active { transform: scale(0.97); }
+        .login-error { color: var(--danger); font-size: 13px; min-height: 20px; margin-top: -6px; margin-bottom: 8px; transition: var(--transition); }
+        /* App */
+        .app-container { width: 100%; max-width: 750px; display: none; flex-direction: column; gap: 16px; }
+        .app-container.visible { display: flex; animation: floatIn 0.5s ease-out; }
+        .app-header {
+            background: var(--card-bg); border-radius: var(--radius); padding: 18px 24px;
+            box-shadow: var(--shadow); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+        }
+        .app-brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; letter-spacing: -0.3px; }
+        .app-brand .emoji { font-size: 30px; }
+        .app-user { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text-light); font-weight: 600; }
+        .app-user .badge { background: #fdf3e5; color: var(--primary-dark); padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; letter-spacing: 0.3px; }
+        .badge-admin { background: #fff0e0; color: #c47a2a; border: 1.5px solid #f0c890; }
+        .btn-logout {
+            background: transparent; border: 1.5px solid #e0d0c0; color: #8a7060; padding: 8px 16px;
+            border-radius: 30px; cursor: pointer; font-family: var(--font); font-weight: 600; font-size: 13px; transition: var(--transition);
+        }
+        .btn-logout:hover { background: #fef9f5; border-color: #c0a080; color: #5a3d28; }
+        /* Nav */
+        .nav-tabs { display: flex; gap: 6px; flex-wrap: wrap; background: var(--card-bg); border-radius: var(--radius); padding: 6px; box-shadow: var(--shadow); }
+        .nav-tab {
+            padding: 11px 20px; border-radius: 30px; border: none; background: transparent;
+            cursor: pointer; font-family: var(--font); font-weight: 700; font-size: 14px; transition: var(--transition);
+            color: var(--text-light); white-space: nowrap;
+        }
+        .nav-tab:hover { background: #fdf6ed; color: var(--text); }
+        .nav-tab.active { background: var(--primary); color: #fff; box-shadow: 0 3px 12px rgba(232,152,62,0.3); }
+        /* Content */
+        .content-area { background: var(--card-bg); border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow); min-height: 300px; transition: var(--transition); }
+        .section-title { font-size: 18px; font-weight: 800; margin-bottom: 18px; display: flex; align-items: center; gap: 8px; letter-spacing: -0.2px; }
+        .lives-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 14px; }
+        .life-card {
+            background: #fefaf5; border-radius: var(--radius-sm); padding: 18px 14px; text-align: center;
+            border: 2px solid transparent; transition: var(--transition); position: relative;
+        }
+        .life-card:hover { border-color: #f0dcc8; box-shadow: 0 4px 16px rgba(120,80,40,0.06); }
+        .life-card .avatar { font-size: 36px; margin-bottom: 6px; }
+        .life-card .name { font-weight: 700; font-size: 14px; margin-bottom: 2px; color: var(--text); }
+        .life-card .lives-count { font-size: 38px; font-weight: 900; color: var(--primary-dark); letter-spacing: -1px; transition: var(--transition); }
+        .life-card .lives-count.low { color: var(--danger); }
+        .life-card .lives-count.high { color: var(--success); }
+        .admin-controls { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; }
+        .admin-btn {
+            width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--border); background: #fff;
+            cursor: pointer; font-size: 18px; font-weight: 700; transition: var(--transition);
+            display: flex; align-items: center; justify-content: center; color: var(--text); font-family: var(--font); line-height: 1;
+        }
+        .admin-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .admin-input {
+            width: 44px; text-align: center; font-weight: 700; font-size: 15px; border: 2px solid var(--border);
+            border-radius: 8px; padding: 6px 4px; font-family: var(--font); background: #fff; transition: var(--transition);
+        }
+        .admin-input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px rgba(232,152,62,0.1); }
+        /* News */
+        .news-list { display: flex; flex-direction: column; gap: 12px; }
+        .news-card {
+            background: #fefaf5; border-radius: var(--radius-sm); padding: 16px 18px; border-left: 4px solid var(--accent);
+            transition: var(--transition); position: relative;
+        }
+        .news-card:hover { box-shadow: 0 3px 14px rgba(120,80,40,0.06); }
+        .news-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; color: var(--text); }
+        .news-content { font-size: 14px; color: var(--text-light); line-height: 1.5; margin-bottom: 8px; white-space: pre-wrap; word-break: break-word; }
+        .news-meta { font-size: 11px; color: #b0a090; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .news-actions { display: flex; gap: 6px; margin-top: 6px; }
+        .no-data { text-align: center; color: #c4b8a8; padding: 40px 20px; font-size: 15px; }
+        .btn-add-news {
+            margin-bottom: 16px; padding: 10px 22px; border-radius: 30px; border: none; background: var(--success);
+            color: #fff; font-weight: 700; cursor: pointer; font-family: var(--font); font-size: 14px;
+            transition: var(--transition); box-shadow: 0 3px 12px rgba(107,158,90,0.25);
+        }
+        .btn-add-news:hover { background: #5a8a4a; box-shadow: 0 5px 20px rgba(107,158,90,0.35); transform: translateY(-1px); }
+        .btn-danger-sm {
+            background: transparent; border: 1.5px solid #f0c0c0; color: var(--danger); padding: 6px 12px;
+            font-size: 12px; border-radius: 20px; cursor: pointer; transition: var(--transition); font-family: var(--font); font-weight: 600;
+        }
+        .btn-danger-sm:hover { background: #fef5f5; border-color: var(--danger); }
+        .btn-edit-sm {
+            background: transparent; border: 1.5px solid #d4c8b8; color: #8a7560; padding: 6px 12px;
+            font-size: 12px; border-radius: 20px; cursor: pointer; transition: var(--transition); font-family: var(--font); font-weight: 600;
+        }
+        .btn-edit-sm:hover { background: #fdfaf6; border-color: var(--accent); color: #6b5030; }
+        /* Modal */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(40,20,10,0.5); z-index: 2000;
+            display: flex; align-items: center; justify-content: center; padding: 20px; animation: fadeIn 0.2s ease;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .modal {
+            background: #fff; border-radius: var(--radius); padding: 28px 24px 22px;
+            width: 100%; max-width: 460px; box-shadow: var(--shadow-lg); animation: floatIn 0.3s ease-out;
+        }
+        .modal h3 { font-size: 18px; font-weight: 800; margin-bottom: 16px; letter-spacing: -0.2px; }
+        .modal input, .modal textarea {
+            width: 100%; padding: 12px 14px; border-radius: var(--radius-sm); border: 2px solid var(--border);
+            font-family: var(--font); font-size: 14px; margin-bottom: 10px; background: #fefaf5;
+            transition: var(--transition); outline: none; resize: vertical;
+        }
+        .modal textarea { min-height: 100px; }
+        .modal input:focus, .modal textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(232,152,62,0.08); }
+        .modal-buttons { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+        .btn-cancel {
+            background: transparent; border: 2px solid var(--border); color: var(--text-light); padding: 11px 20px;
+            border-radius: 30px; cursor: pointer; font-weight: 700; font-family: var(--font); font-size: 14px; transition: var(--transition);
+        }
+        .btn-cancel:hover { background: #f5f0ea; }
+        .btn-save {
+            background: var(--primary); color: #fff; border: none; padding: 11px 22px; border-radius: 30px;
+            cursor: pointer; font-weight: 700; font-family: var(--font); font-size: 14px; transition: var(--transition);
+            box-shadow: 0 3px 12px rgba(232,152,62,0.3);
+        }
+        .btn-save:hover { background: var(--primary-dark); box-shadow: 0 5px 20px rgba(232,152,62,0.4); }
+        .btn-delete-modal {
+            background: var(--danger); color: #fff; border: none; padding: 11px 20px; border-radius: 30px;
+            cursor: pointer; font-weight: 700; font-family: var(--font); font-size: 14px; transition: var(--transition); margin-right: auto;
+        }
+        .btn-delete-modal:hover { background: var(--danger-hover); }
+        /* Toast */
+        .toast {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            background: #3d2c1e; color: #fff; padding: 12px 24px; border-radius: 30px; font-weight: 700; font-size: 14px;
+            z-index: 3000; box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+            animation: slideDown 0.35s ease-out, fadeOut 0.4s ease 1.8s forwards; pointer-events: none;
+        }
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateX(-50%) translateY(-40px); }
+            to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+        @keyframes fadeOut { to { opacity: 0; transform: translateX(-50%) translateY(-20px); } }
+        /* Cabinet */
+        .cabinet-card { text-align: center; padding: 30px 20px; }
+        .cabinet-avatar { font-size: 70px; margin-bottom: 8px; }
+        .cabinet-name { font-size: 22px; font-weight: 800; letter-spacing: -0.3px; }
+        .cabinet-lives {
+            font-size: 64px; font-weight: 900; color: var(--primary-dark); letter-spacing: -2px; margin: 8px 0; transition: var(--transition);
+        }
+        .cabinet-lives.low { color: var(--danger); }
+        .cabinet-lives.high { color: var(--success); }
+        .cabinet-message { font-size: 15px; color: var(--text-light); font-weight: 600; }
+        /* Responsive */
+        @media (max-width: 500px) {
+            .lives-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; }
+            .life-card { padding: 14px 8px; }
+            .life-card .lives-count { font-size: 28px; }
+            .life-card .avatar { font-size: 26px; }
+            .app-header { padding: 14px 16px; font-size: 16px; }
+            .app-brand { font-size: 17px; }
+            .nav-tab { padding: 9px 14px; font-size: 12px; }
+            .content-area { padding: 16px; }
+            .login-card { padding: 28px 18px 22px; }
+            .login-title { font-size: 22px; }
+            .cabinet-lives { font-size: 48px; }
+            .cabinet-avatar { font-size: 50px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-card">
+            <div class="login-logo">🦆🐦</div>
+            <div class="login-title">Гусяси Воробейчики</div>
+            <div class="login-subtitle">закрытый клуб избранных</div>
+            <select class="login-select" id="loginSelect">
+                <option value="">— выбери себя —</option>
+                <option value="Алекса">Алекса</option>
+                <option value="Даня">Даня</option>
+                <option value="Петя">Петя</option>
+                <option value="Тася">Тася</option>
+            </select>
+            <input type="password" class="login-input" id="loginPassword" placeholder="Пароль" autocomplete="off">
+            <div class="login-error" id="loginError"></div>
+            <button class="btn btn-primary" id="btnLogin">🚪 Войти в чат</button>
+        </div>
+    </div>
 
-def generate_token(name, ip, user_agent):
-    token = secrets.token_hex(32)
-    expires = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRY_HOURS)
-    active_tokens[token] = {"name": name, "expires": expires, "ip": ip, "user_agent": user_agent}
-    save_tokens()
-    return token
+    <div class="app-container" id="appContainer">
+        <div class="app-header">
+            <div class="app-brand"><span class="emoji">🦆🐦</span> Гусяси Воробейчики</div>
+            <div class="app-user">
+                <span id="currentUserName">—</span>
+                <span class="badge badge-admin" id="adminBadge" style="display:none;">Админ</span>
+                <button class="btn-logout" id="btnLogout">🚪 Выйти</button>
+            </div>
+        </div>
+        <div class="nav-tabs" id="navTabs">
+            <button class="nav-tab active" data-tab="lives">❤️ Жизни</button>
+            <button class="nav-tab" data-tab="news">📰 Новости</button>
+            <button class="nav-tab" data-tab="cabinet">🏠 Личный кабинет</button>
+            <button class="nav-tab" data-tab="admin" id="tabAdmin" style="display:none;">⚙️ Админ-панель</button>
+        </div>
+        <div class="content-area" id="contentArea"></div>
+    </div>
 
-def get_user_by_token(token):
-    info = active_tokens.get(token)
-    if not info or info["expires"] < datetime.utcnow():
-        return None
-    if get_real_ip() != info.get("ip") or request.headers.get("User-Agent") != info.get("user_agent"):
-        del active_tokens[token]
-        save_tokens()
-        return None
-    return info["name"]
+    <div class="modal-overlay" id="modalOverlay" style="display:none;">
+        <div class="modal" id="modalBox"></div>
+    </div>
+    <div id="toastContainer"></div>
 
-def generate_csrf_token():
-    return secrets.token_hex(32)
+    <script>
+        (function() {
+            const API_BASE = "";
+            let appData = { users: [], news: [] };
+            let currentUser = null;
+            let activeTab = 'lives';
 
-def get_real_ip():
-    return request.headers.get('X-Forwarded-For', request.remote_addr)
+            // DOM
+            const loginOverlay = document.getElementById('loginOverlay');
+            const loginSelect = document.getElementById('loginSelect');
+            const loginPassword = document.getElementById('loginPassword');
+            const loginError = document.getElementById('loginError');
+            const btnLogin = document.getElementById('btnLogin');
+            const appContainer = document.getElementById('appContainer');
+            const currentUserName = document.getElementById('currentUserName');
+            const adminBadge = document.getElementById('adminBadge');
+            const tabAdmin = document.getElementById('tabAdmin');
+            const contentArea = document.getElementById('contentArea');
+            const navTabs = document.getElementById('navTabs');
+            const modalOverlay = document.getElementById('modalOverlay');
+            const modalBox = document.getElementById('modalBox');
+            const toastContainer = document.getElementById('toastContainer');
+            const btnLogout = document.getElementById('btnLogout');
 
-def check_origin():
-    origin = request.headers.get("Origin") or request.headers.get("Referer")
-    if not origin:
-        return False
-    origin = origin.rstrip("/")
-    return origin in ALLOWED_ORIGINS
+            // Cookie helper
+            function getCookie(name) {
+                const value = `; ${document.cookie}`;
+                const parts = value.split(`; ${name}=`);
+                if (parts.length === 2) return parts.pop().split(';').shift();
+                return null;
+            }
 
-def rate_limit(endpoint):
-    key = f"{get_real_ip()}:{endpoint}"
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW
-    rate_limit_cache.setdefault(key, []).append(now)
-    rate_limit_cache[key] = [t for t in rate_limit_cache[key] if t > window_start]
-    return len(rate_limit_cache[key]) > RATE_LIMIT_MAX_REQUESTS
+            // API fetch
+            async function apiFetch(url, options = {}) {
+                const headers = { 'Content-Type': 'application/json' };
+                const csrfToken = getCookie('csrf_token');
+                if (options.method && options.method !== 'GET' && csrfToken) {
+                    headers['X-CSRF-Token'] = csrfToken;
+                }
+                const res = await fetch(API_BASE + url, {
+                    ...options,
+                    headers: { ...headers, ...options.headers },
+                    credentials: 'same-origin'
+                });
+                if (!res.ok) {
+                    let errBody;
+                    try { errBody = await res.json(); } catch { errBody = { error: `Ошибка ${res.status}` }; }
+                    throw new Error(errBody.error || `Ошибка ${res.status}`);
+                }
+                return res.json();
+            }
 
-def is_banned():
-    ip = get_real_ip()
-    if ip in banned_ips:
-        if time.time() - banned_ips[ip] < BAN_TIME:
-            return True
-        else:
-            del banned_ips[ip]
-    return False
+            function showToast(message) {
+                const toast = document.createElement('div');
+                toast.className = 'toast';
+                toast.textContent = message;
+                toastContainer.appendChild(toast);
+                setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 2400);
+            }
 
-def require_origin(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not check_origin():
-            return jsonify({"error": "Доступ запрещён (Origin)"}), 403
-        return f(*args, **kwargs)
-    return decorated
+            async function refreshData() {
+                try {
+                    const [users, news] = await Promise.all([
+                        apiFetch('/api/lives'),
+                        apiFetch('/api/news')
+                    ]);
+                    appData.users = users;
+                    appData.news = news;
+                } catch (e) {
+                    showToast('⚠️ Не удалось загрузить данные');
+                    console.error(e);
+                }
+            }
 
-def require_auth(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not check_origin():
-            return jsonify({"error": "Доступ запрещён (Origin)"}), 403
-        token = request.cookies.get("auth_token")
-        if not token:
-            return jsonify({"error": "Требуется авторизация"}), 401
-        username = get_user_by_token(token)
-        if not username:
-            return jsonify({"error": "Недействительный токен"}), 401
-        request.current_user = username
-        return f(*args, **kwargs)
-    return decorated
+            async function handleLogin() {
+                const name = loginSelect.value;
+                const password = loginPassword.value;
+                loginError.textContent = '';
+                if (!name || !password) { loginError.textContent = 'Заполни все поля!'; return; }
+                try {
+                    const user = await apiFetch('/api/login', { method: 'POST', body: JSON.stringify({ name, password }) });
+                    currentUser = user;
+                    loginOverlay.classList.add('hidden');
+                    appContainer.classList.add('visible');
+                    currentUserName.textContent = user.name;
+                    if (user.isAdmin) {
+                        adminBadge.style.display = 'inline-block';
+                        tabAdmin.style.display = 'inline-block';
+                    } else {
+                        adminBadge.style.display = 'none';
+                        tabAdmin.style.display = 'none';
+                    }
+                    loginPassword.value = '';
+                    loginError.textContent = '';
+                    activeTab = 'lives';
+                    updateNavTabs();
+                    await refreshData();
+                    renderContent();
+                    showToast('👋 Привет, ' + user.name + '!');
+                } catch (e) {
+                    loginError.textContent = e.message;
+                    loginPassword.value = '';
+                }
+            }
 
-def require_admin(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        username = getattr(request, 'current_user', None)
-        if not username:
-            return jsonify({"error": "Требуется авторизация"}), 401
-        data = load_data()
-        user = next((u for u in data["users"] if u["name"] == username), None)
-        if not user or not user["isAdmin"]:
-            return jsonify({"error": "Только админ"}), 403
-        return f(*args, **kwargs)
-    return decorated
+            async function handleLogout() {
+                try { await apiFetch('/api/logout', { method: 'POST' }); } catch (e) {}
+                currentUser = null;
+                appContainer.classList.remove('visible');
+                loginOverlay.classList.remove('hidden');
+                loginSelect.value = '';
+                loginPassword.value = '';
+                loginError.textContent = '';
+                adminBadge.style.display = 'none';
+                tabAdmin.style.display = 'none';
+                activeTab = 'lives';
+                updateNavTabs();
+                modalOverlay.style.display = 'none';
+                appData = { users: [], news: [] };
+            }
 
-def require_csrf(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if request.method in ["POST", "PATCH", "PUT", "DELETE"]:
-            header_token = request.headers.get("X-CSRF-Token")
-            cookie_token = request.cookies.get("csrf_token")
-            if not header_token or not cookie_token or header_token != cookie_token:
-                return jsonify({"error": "Недействительный CSRF-токен"}), 403
-        return f(*args, **kwargs)
-    return decorated
+            btnLogin.addEventListener('click', handleLogin);
+            loginPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleLogin(); });
+            btnLogout.addEventListener('click', handleLogout);
 
-@app.after_request
-def add_security_headers(response):
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    return response
+            // Session restore
+            async function tryRestoreSession() {
+                try {
+                    const me = await apiFetch('/api/me');
+                    currentUser = me;
+                    appContainer.classList.add('visible');
+                    loginOverlay.classList.add('hidden');
+                    currentUserName.textContent = me.name;
+                    if (me.isAdmin) {
+                        adminBadge.style.display = 'inline-block';
+                        tabAdmin.style.display = 'inline-block';
+                    }
+                    await refreshData();
+                    renderContent();
+                } catch (e) { /* нет сессии */ }
+            }
 
-@app.route("/")
-def serve_index():
-    return send_from_directory(".", "index.html")
+            function updateNavTabs() {
+                const tabs = navTabs.querySelectorAll('.nav-tab');
+                tabs.forEach(tab => {
+                    tab.classList.remove('active');
+                    if (tab.dataset.tab === activeTab) tab.classList.add('active');
+                });
+            }
+            navTabs.addEventListener('click', (e) => {
+                const tab = e.target.closest('.nav-tab');
+                if (!tab) return;
+                const tabName = tab.dataset.tab;
+                if (tabName === 'admin' && !currentUser?.isAdmin) return;
+                activeTab = tabName;
+                updateNavTabs();
+                renderContent();
+            });
 
-@app.route("/index.html")
-def serve_index_explicit():
-    return send_from_directory(".", "index.html")
+            function renderContent() {
+                if (!currentUser) return;
+                switch (activeTab) {
+                    case 'lives': renderLives(); break;
+                    case 'news': renderNews(); break;
+                    case 'cabinet': renderCabinet(); break;
+                    case 'admin': renderAdmin(); break;
+                }
+            }
 
-@app.route('/favicon.ico')
-def favicon():
-    return '', 204
+            function renderLives() {
+                const users = appData.users;
+                let html = '<div class="section-title">❤️ Жизни участников</div><div class="lives-grid">';
+                users.forEach(user => {
+                    const livesClass = user.lives <= 1 ? 'low' : (user.lives >= 6 ? 'high' : '');
+                    html += `<div class="life-card">
+                        <div class="avatar">${user.avatar}</div>
+                        <div class="name">${escapeHtml(user.name)}${user.isAdmin ? ' (Админ)' : ''}</div>
+                        <div class="lives-count ${livesClass}">${user.lives}</div>
+                        ${currentUser.isAdmin ? `
+                        <div class="admin-controls">
+                            <button class="admin-btn" onclick="window._adminChangeLives('${user.name}', -1)">−</button>
+                            <input type="number" class="admin-input" value="${user.lives}" 
+                                   onchange="window._adminSetLives('${user.name}', this.value)" 
+                                   onfocus="this.select()" min="0" max="99">
+                            <button class="admin-btn" onclick="window._adminChangeLives('${user.name}', 1)">+</button>
+                        </div>` : ''}
+                    </div>`;
+                });
+                html += '</div>';
+                if (currentUser.isAdmin) html += '<p style="margin-top:14px;font-size:12px;color:#b0a090;">💡 Ты админ — меняй жизни кнопками или вводом</p>';
+                contentArea.innerHTML = html;
+            }
 
-@app.route("/ping")
-def ping():
-    return "pong"
+            function renderNews() {
+                const news = [...appData.news].sort((a,b) => new Date(b.date) - new Date(a.date));
+                let html = '<div class="section-title">📰 Новости</div>';
+                html += '<button class="btn-add-news" onclick="window._openNewsModal()">➕ Добавить новость</button>';
+                if (news.length === 0) {
+                    html += '<div class="no-data">Пока новостей нет. Добавь первую! 🐣</div>';
+                } else {
+                    html += '<div class="news-list">';
+                    news.forEach(item => {
+                        const dateStr = new Date(item.date).toLocaleDateString('ru-RU', { day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit' });
+                        html += `<div class="news-card">
+                            <div class="news-title">📌 ${escapeHtml(item.title)}</div>
+                            <div class="news-content">${escapeHtml(item.content)}</div>
+                            <div class="news-meta"><span>👤 ${escapeHtml(item.author)}</span><span>🕒 ${dateStr}</span></div>
+                            <div class="news-actions">
+                                <button class="btn-edit-sm" onclick="window._openNewsModal(${item.id})">✏️</button>
+                                <button class="btn-danger-sm" onclick="window._deleteNews(${item.id})">🗑️</button>
+                            </div>
+                        </div>`;
+                    });
+                    html += '</div>';
+                }
+                contentArea.innerHTML = html;
+            }
 
-@app.route("/api/login", methods=["POST"])
-@require_origin
-def login():
-    ip = get_real_ip()
-    if is_banned():
-        return jsonify({"error": "Заблокированы"}), 429
-    if rate_limit("login"):
-        return jsonify({"error": "Слишком много попыток"}), 429
+            function renderCabinet() {
+                const user = appData.users.find(u => u.name === currentUser.name) || currentUser;
+                const livesClass = user.lives <= 1 ? 'low' : (user.lives >= 6 ? 'high' : '');
+                let message = '';
+                if (user.lives >= 4) message = '🔥 Ты в огне! Просто легенда!';
+                else if (user.lives >= 3) message = '💪 Отлично! Держишься молодцом!';
+                else if (user.lives >= 2) message = '🙂 Нормально, стабильность — признак мастерства.';
+                else if (user.lives >= 1) message = '😬 Осторожно! Жизни на исходе...';
+                else message = '💀 Берегись! Жизней нет... но ты всё ещё в игре!';
+                let html = `<div class="cabinet-card">
+                    <div class="cabinet-avatar">${user.avatar}</div>
+                    <div class="cabinet-name">${escapeHtml(user.name)}${user.isAdmin ? ' (Админ)' : ''}</div>
+                    <div class="cabinet-lives ${livesClass}">${user.lives}</div>
+                    <div style="font-size:13px;color:#b0a090;">жизней</div>
+                    <div class="cabinet-message">${message}</div>
+                    ${user.isAdmin ? '<p style="margin-top:16px;font-size:12px;color:#c47a2a;">⚙️ Админ-доступ</p>' : ''}
+                </div>`;
+                contentArea.innerHTML = html;
+            }
 
-    body = request.json
-    name = body.get("name", "").strip()
-    password = body.get("password", "")
+            function renderAdmin() {
+                if (!currentUser?.isAdmin) { activeTab = 'lives'; updateNavTabs(); renderLives(); return; }
+                const users = appData.users;
+                if (!users || users.length === 0) {
+                    contentArea.innerHTML = '<div class="no-data">Список не загружен. <button onclick="refreshData().then(()=>renderContent())">Попробовать снова</button></div>';
+                    return;
+                }
+                let html = '<div class="section-title">⚙️ Админ-панель</div>';
+                html += '<div style="display:flex;flex-direction:column;gap:10px;">';
+                users.forEach(user => {
+                    html += `<div style="display:flex;align-items:center;justify-content:space-between;background:#fefaf5;border-radius:12px;padding:12px 16px;">
+                        <span style="font-weight:700;">${user.avatar} ${escapeHtml(user.name)}${user.isAdmin ? ' (Админ)' : ''}</span>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <button class="admin-btn" onclick="window._adminChangeLives('${user.name}', -1)">−</button>
+                            <span style="font-weight:900;font-size:20px;color:${user.lives <= 1 ? 'var(--danger)' : (user.lives >= 6 ? 'var(--success)' : 'var(--primary-dark)')};">${user.lives}</span>
+                            <button class="admin-btn" onclick="window._adminChangeLives('${user.name}', 1)">+</button>
+                            <input type="number" class="admin-input" value="${user.lives}" 
+                                   onchange="window._adminSetLives('${user.name}', this.value)" 
+                                   onfocus="this.select()" min="0" max="99" style="width:50px;">
+                        </div>
+                    </div>`;
+                });
+                html += '</div>';
+                contentArea.innerHTML = html;
+            }
 
-    if not name or not password:
-        return jsonify({"error": "Имя и пароль обязательны"}), 400
+            window._adminChangeLives = async function(name, delta) {
+                if (!currentUser?.isAdmin) return;
+                try {
+                    const res = await apiFetch(`/api/lives/${name}`, { method: 'PATCH', body: JSON.stringify({ delta }) });
+                    await refreshData();
+                    renderContent();
+                    showToast(`${delta>0?'+':''}${delta} жизнь — ${name} (${res.lives})`);
+                } catch (e) { showToast('❌ ' + e.message); }
+            };
+            window._adminSetLives = async function(name, value) {
+                if (!currentUser?.isAdmin) return;
+                const lives = parseInt(value, 10);
+                if (isNaN(lives) || lives < 0) return;
+                try {
+                    await apiFetch(`/api/lives/${name}`, { method: 'PATCH', body: JSON.stringify({ lives }) });
+                    await refreshData();
+                    renderContent();
+                    showToast(`🎯 Жизни ${name} установлены на ${lives}`);
+                } catch (e) { showToast('❌ ' + e.message); }
+            };
 
-    data = load_data()
-    user = next((u for u in data["users"] if u["name"] == name), None)
-    if not user:
-        return jsonify({"error": "Неверное имя или пароль"}), 401
+            window._openNewsModal = function(newsId = null) {
+                const existing = newsId ? appData.news.find(n => n.id === newsId) : null;
+                const isEdit = !!existing;
+                let modalHTML = `<h3>${isEdit ? '✏️ Редактировать' : '➕ Новая новость'}</h3>
+                    <input type="text" id="modalNewsTitle" placeholder="Заголовок" value="${isEdit ? escapeAttr(existing.title) : ''}" maxlength="100">
+                    <textarea id="modalNewsContent" placeholder="Текст...">${isEdit ? escapeHtml(existing.content) : ''}</textarea>
+                    <div class="modal-buttons">
+                        ${isEdit ? '<button class="btn-delete-modal" id="btnModalDelete">🗑️ Удалить</button>' : ''}
+                        <button class="btn-cancel" id="btnModalCancel">Отмена</button>
+                        <button class="btn-save" id="btnModalSave">${isEdit ? '💾 Сохранить' : '📢 Опубликовать'}</button>
+                    </div>`;
+                modalBox.innerHTML = modalHTML;
+                modalOverlay.style.display = 'flex';
+                const closeModal = () => { modalOverlay.style.display = 'none'; };
+                document.getElementById('btnModalCancel').addEventListener('click', closeModal);
+                modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
+                document.getElementById('btnModalSave').addEventListener('click', async () => {
+                    const title = document.getElementById('modalNewsTitle').value.trim();
+                    const content = document.getElementById('modalNewsContent').value.trim();
+                    if (!title || !content) { showToast('⚠️ Заполни оба поля!'); return; }
+                    try {
+                        if (isEdit) {
+                            await apiFetch(`/api/news/${newsId}`, { method: 'PUT', body: JSON.stringify({ title, content }) });
+                        } else {
+                            await apiFetch('/api/news', { method: 'POST', body: JSON.stringify({ title, content }) });
+                        }
+                        await refreshData();
+                        closeModal();
+                        if (activeTab === 'news') renderNews();
+                        showToast(isEdit ? '✅ Обновлено!' : '📢 Опубликовано!');
+                    } catch (e) { showToast('❌ ' + e.message); }
+                });
+                if (isEdit) {
+                    document.getElementById('btnModalDelete').addEventListener('click', async () => {
+                        if (!confirm('Точно удалить?')) return;
+                        try {
+                            await apiFetch(`/api/news/${newsId}`, { method: 'DELETE' });
+                            await refreshData();
+                            closeModal();
+                            if (activeTab === 'news') renderNews();
+                            showToast('🗑️ Удалено');
+                        } catch (e) { showToast('❌ ' + e.message); }
+                    });
+                }
+                setTimeout(() => { const inp = document.getElementById('modalNewsTitle'); if (inp) inp.focus(); }, 150);
+            };
+            window._deleteNews = async function(newsId) {
+                if (!confirm('Точно удалить?')) return;
+                try {
+                    await apiFetch(`/api/news/${newsId}`, { method: 'DELETE' });
+                    await refreshData();
+                    if (activeTab === 'news') renderNews();
+                    showToast('🗑️ Удалено');
+                } catch (e) { showToast('❌ ' + e.message); }
+            };
 
-    if "password_hash" in user:
-        if not verify_password(password, user.get("salt", ""), user["password_hash"]):
-            failed_logins.setdefault(ip, {"count": 0, "first_attempt": time.time()})
-            failed_logins[ip]["count"] += 1
-            if failed_logins[ip]["count"] >= MAX_FAILED_LOGINS:
-                banned_ips[ip] = time.time()
-                failed_logins.pop(ip, None)
-                return jsonify({"error": "Слишком много неверных попыток. Заблокированы"}), 429
-            return jsonify({"error": "Неверное имя или пароль"}), 401
-    else:
-        if user.get("password") != password:
-            return jsonify({"error": "Неверное имя или пароль"}), 401
+            function escapeHtml(str) {
+                const div = document.createElement('div');
+                div.textContent = str;
+                return div.innerHTML;
+            }
+            function escapeAttr(str) {
+                return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
 
-    failed_logins.pop(ip, None)
-    token = generate_token(user["name"], ip, request.headers.get("User-Agent", ""))
-    csrf = generate_csrf_token()
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && modalOverlay.style.display === 'flex') modalOverlay.style.display = 'none';
+                if (e.ctrlKey && !e.metaKey && currentUser) {
+                    const tabMap = { '1': 'lives', '2': 'news', '3': 'cabinet', '4': 'admin' };
+                    const tab = tabMap[e.key];
+                    if (tab === 'admin' && !currentUser.isAdmin) return;
+                    if (tab) { e.preventDefault(); activeTab = tab; updateNavTabs(); renderContent(); }
+                }
+            });
 
-    resp = make_response(jsonify({
-        "name": user["name"], "avatar": user["avatar"], "isAdmin": user["isAdmin"], "lives": user["lives"],
-        "csrf_token": csrf
-    }))
-    resp.set_cookie("auth_token", value=token, max_age=TOKEN_EXPIRY_HOURS*3600,
-                    httponly=True, secure=True, samesite="Strict", path="/")
-    resp.set_cookie("csrf_token", value=csrf, max_age=TOKEN_EXPIRY_HOURS*3600,
-                    httponly=False, secure=True, samesite="Strict", path="/")
-    return resp
-
-@app.route("/api/logout", methods=["POST"])
-def logout():
-    token = request.cookies.get("auth_token")
-    if token and token in active_tokens:
-        del active_tokens[token]
-        save_tokens()
-    resp = make_response(jsonify({"ok": True}))
-    resp.set_cookie("auth_token", "", expires=0, httponly=True, secure=True, samesite="Strict", path="/")
-    resp.set_cookie("csrf_token", "", expires=0, httponly=False, secure=True, samesite="Strict", path="/")
-    return resp
-
-@app.route("/api/lives")
-@require_auth
-def get_lives():
-    data = load_data()
-    users = [{k: v for k, v in u.items() if k != "password"} for u in data["users"]]
-    return jsonify(users)
-
-@app.route("/api/lives/<name>", methods=["PATCH"])
-@require_auth
-@require_admin
-@require_csrf
-def update_lives(name):
-    if rate_limit("lives_update"):
-        return jsonify({"error": "Слишком много запросов"}), 429
-    data = load_data()
-    user = next((u for u in data["users"] if u["name"] == name), None)
-    if not user:
-        return jsonify({"error": "Пользователь не найден"}), 404
-    body = request.json
-    if "lives" in body:
-        lives = int(body["lives"])
-        lives = max(0, min(99, lives))
-        user["lives"] = lives
-    elif "delta" in body:
-        delta = int(body["delta"])
-        user["lives"] = max(0, min(99, user["lives"] + delta))
-    else:
-        return jsonify({"error": "Укажите lives или delta"}), 400
-    save_data(data)
-    return jsonify({"name": user["name"], "lives": user["lives"]})
-
-@app.route("/api/me")
-@require_auth
-def me():
-    data = load_data()
-    user = next((u for u in data["users"] if u["name"] == request.current_user), None)
-    if not user:
-        return jsonify({"error": "Пользователь не найден"}), 404
-    return jsonify({"name": user["name"], "avatar": user["avatar"], "isAdmin": user["isAdmin"], "lives": user["lives"]})
-
-@app.route("/api/news")
-@require_auth
-def get_news():
-    data = load_data()
-    news = sorted(data["news"], key=lambda n: n["date"], reverse=True)
-    return jsonify(news)
-
-@app.route("/api/news", methods=["POST"])
-@require_auth
-@require_csrf
-def add_news():
-    if rate_limit("news_add"):
-        return jsonify({"error": "Слишком часто"}), 429
-    body = request.json
-    title = body.get("title", "").strip()
-    content = body.get("content", "").strip()
-    if not title or not content:
-        return jsonify({"error": "Заголовок и текст обязательны"}), 400
-    data = load_data()
-    new_id = data["nextNewsId"]
-    news_item = {
-        "id": new_id, "title": title, "content": content,
-        "author": request.current_user, "date": datetime.utcnow().isoformat()
-    }
-    data["news"].append(news_item)
-    data["nextNewsId"] = new_id + 1
-    save_data(data)
-    return jsonify(news_item), 201
-
-@app.route("/api/news/<int:news_id>", methods=["PUT"])
-@require_auth
-@require_csrf
-def edit_news(news_id):
-    data = load_data()
-    item = next((n for n in data["news"] if n["id"] == news_id), None)
-    if not item:
-        return jsonify({"error": "Новость не найдена"}), 404
-    body = request.json
-    title = body.get("title", "").strip()
-    content = body.get("content", "").strip()
-    if not title or not content:
-        return jsonify({"error": "Заголовок и текст обязательны"}), 400
-    item["title"] = title
-    item["content"] = content
-    item["date"] = datetime.utcnow().isoformat()
-    save_data(data)
-    return jsonify(item)
-
-@app.route("/api/news/<int:news_id>", methods=["DELETE"])
-@require_auth
-@require_csrf
-def delete_news(news_id):
-    data = load_data()
-    item = next((n for n in data["news"] if n["id"] == news_id), None)
-    if not item:
-        return jsonify({"error": "Новость не найдена"}), 404
-    data["news"] = [n for n in data["news"] if n["id"] != news_id]
-    save_data(data)
-    return jsonify({"ok": True})
-
-EMERGENCY_RESET_KEY = os.environ.get("EMERGENCY_RESET_KEY", "change-me-emergency")
-@app.route("/emergency-reset")
-def emergency_reset():
-    if request.args.get("key") != EMERGENCY_RESET_KEY:
-        return "denied", 403
-    active_tokens.clear()
-    data = load_data()
-    data["tokens"] = {}
-    save_data(data)
-    return "All sessions destroyed.", 200
-
-if __name__ == "__main__":
-    load_tokens()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+            async function init() {
+                await tryRestoreSession();
+            }
+            init();
+        })();
+    </script>
+</body>
+</html>
