@@ -4,7 +4,7 @@ import secrets
 import time
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify, send_from_directory, abort, make_response
+from flask import Flask, request, jsonify, send_from_directory, make_response
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -12,39 +12,47 @@ CORS(app, supports_credentials=True)
 
 DATA_FILE = "data.json"
 TOKEN_EXPIRY_HOURS = 24
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_MAX_REQUESTS = 10
+RATE_LIMIT_WINDOW = 60          # секунд
+RATE_LIMIT_MAX_REQUESTS = 10    # запросов за окно
 
-# Разрешённые домены (добавь свои реальные)
+# Разрешённые домены (укажи свои реальные)
 ALLOWED_ORIGINS = {
     "https://gusasya-vorobeychiky.onrender.com",
-    "https://dbgusvor.onrender.com"
+    "https://dbgusvor.onrender.com",
 }
 
 # ─────────────────────────────────────────────
-#  ПАРОЛИ ИЗ ENVIRONMENT
+#  ПАРОЛИ ИЗ ENVIRONMENT (с fallback для локальной разработки)
 # ─────────────────────────────────────────────
 DEFAULT_USERS = [
-    {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA"), "lives": 3, "isAdmin": False, "avatar": "☕"},
-    {"id": 5, "name": "Тася",     "password": os.environ.get("PASSWORD_TASYA"), "lives": 3, "isAdmin": True,  "avatar": "☕"},
+    {"id": 1, "name": "Арсений", "password": os.environ.get("PASSWORD_ARSENIY", "ars2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 2, "name": "Алекса",   "password": os.environ.get("PASSWORD_ALEKSA", "alexa2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 3, "name": "Даня",     "password": os.environ.get("PASSWORD_DANYA", "danya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 4, "name": "Петя",     "password": os.environ.get("PASSWORD_PETYA", "petya2024"), "lives": 3, "isAdmin": False, "avatar": "☕"},
+    {"id": 5, "name": "Тася",     "password": os.environ.get("PASSWORD_TASYA", "tasya2024"), "lives": 3, "isAdmin": True,  "avatar": "☕"},
 ]
 
 DEFAULT_NEWS = [
-    {"id": 1, "title": "Добро пожаловать!", "content": "Это наша общая доска новостей...", "author": "Тася", "date": "2024-01-15T12:00:00"}
+    {"id": 1, "title": "Добро пожаловать!", "content": "Это наша общая доска новостей. Здесь можно писать всё что угодно — анонсы, мемы, важные объявления. Редактировать может каждый!", "author": "Тася", "date": "2026-05-19T12:00:00"}
 ]
 
-active_tokens = {}
-rate_limit_cache = {}
+# ─────────────────────────────────────────────
+#  ХРАНИЛИЩА (в памяти + диск)
+# ─────────────────────────────────────────────
+active_tokens = {}       # token -> {"name": str, "expires": datetime}
+rate_limit_cache = {}    # "ip:endpoint" -> [timestamps]
 
 # ─────────────────────────────────────────────
-#  ФУНКЦИИ
+#  РАБОТА С ДАННЫМИ
 # ─────────────────────────────────────────────
 def load_data():
     if not os.path.exists(DATA_FILE):
-        data = {"users": DEFAULT_USERS, "news": DEFAULT_NEWS, "nextNewsId": 2, "tokens": {}}
+        data = {
+            "users": DEFAULT_USERS,
+            "news": DEFAULT_NEWS,
+            "nextNewsId": 2,
+            "tokens": {}
+        }
         save_data(data)
         return data
     with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -55,6 +63,7 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def load_tokens():
+    """Загружаем сохранённые токены и удаляем просроченные."""
     data = load_data()
     for token, info in data.get("tokens", {}).items():
         if "expires" in info:
@@ -68,10 +77,14 @@ def load_tokens():
         save_tokens()
 
 def save_tokens():
+    """Сохраняем active_tokens в data.json."""
     data = load_data()
     serializable = {}
     for token, info in active_tokens.items():
-        serializable[token] = {"name": info["name"], "expires": info["expires"].isoformat()}
+        serializable[token] = {
+            "name": info["name"],
+            "expires": info["expires"].isoformat()
+        }
     data["tokens"] = serializable
     save_data(data)
 
@@ -91,16 +104,19 @@ def get_user_by_token(token):
 def generate_csrf_token():
     return secrets.token_hex(32)
 
-# Проверка Origin
+# ─────────────────────────────────────────────
+#  ЗАЩИТНЫЕ ДЕКОРАТОРЫ
+# ─────────────────────────────────────────────
 def check_origin():
+    """Проверяет, что запрос пришёл с разрешённого домена."""
     origin = request.headers.get("Origin") or request.headers.get("Referer")
     if not origin:
         return False
     origin = origin.rstrip("/")
     return origin in ALLOWED_ORIGINS
 
-# Rate limiting
 def rate_limit(endpoint):
+    """Ограничение частоты запросов к конечной точке."""
     key = f"{request.remote_addr}:{endpoint}"
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
@@ -108,8 +124,8 @@ def rate_limit(endpoint):
     rate_limit_cache[key] = [t for t in rate_limit_cache[key] if t > window_start]
     return len(rate_limit_cache[key]) > RATE_LIMIT_MAX_REQUESTS
 
-# Декораторы
 def require_origin(f):
+    """Пропускает только запросы с разрешённых Origin."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not check_origin():
@@ -118,6 +134,7 @@ def require_origin(f):
     return decorated
 
 def require_auth(f):
+    """Проверяет наличие валидной сессионной куки."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not check_origin():
@@ -127,12 +144,13 @@ def require_auth(f):
             return jsonify({"error": "Требуется авторизация"}), 401
         username = get_user_by_token(token)
         if not username:
-            return jsonify({"error": "Недействительный токен"}), 401
+            return jsonify({"error": "Недействительный или просроченный токен"}), 401
         request.current_user = username
         return f(*args, **kwargs)
     return decorated
 
 def require_admin(f):
+    """Доступ только админам."""
     @wraps(f)
     def decorated(*args, **kwargs):
         username = getattr(request, 'current_user', None)
@@ -141,23 +159,24 @@ def require_admin(f):
         data = load_data()
         user = next((u for u in data["users"] if u["name"] == username), None)
         if not user or not user["isAdmin"]:
-            return jsonify({"error": "Только админ"}), 403
+            return jsonify({"error": "Только админ может выполнять это действие"}), 403
         return f(*args, **kwargs)
     return decorated
 
 def require_csrf(f):
+    """Double submit cookie: сверяет заголовок X-CSRF-Token с кукой csrf_token."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method in ["POST", "PATCH", "PUT", "DELETE"]:
-            token = request.headers.get("X-CSRF-Token")
-            expected = request.cookies.get("csrf_token")
-            if not token or not expected or token != expected:
+            header_token = request.headers.get("X-CSRF-Token")
+            cookie_token = request.cookies.get("csrf_token")
+            if not header_token or not cookie_token or header_token != cookie_token:
                 return jsonify({"error": "Недействительный CSRF-токен"}), 403
         return f(*args, **kwargs)
     return decorated
 
 # ─────────────────────────────────────────────
-#  СТАТИКА
+#  РАЗДАЧА СТАТИКИ (только index.html)
 # ─────────────────────────────────────────────
 @app.route("/")
 def serve_index():
@@ -168,7 +187,7 @@ def serve_index_explicit():
     return send_from_directory(".", "index.html")
 
 # ─────────────────────────────────────────────
-#  API: ЗДОРОВЬЕ
+#  API: ЗДОРОВЬЕ (для cron-job)
 # ─────────────────────────────────────────────
 @app.route("/ping")
 def ping():
@@ -181,7 +200,7 @@ def ping():
 @require_origin
 def login():
     if rate_limit("login"):
-        return jsonify({"error": "Слишком много попыток"}), 429
+        return jsonify({"error": "Слишком много попыток. Подождите."}), 429
 
     body = request.json
     name = body.get("name", "").strip()
@@ -195,21 +214,39 @@ def login():
     if not user or user["password"] != password:
         return jsonify({"error": "Неверное имя или пароль"}), 401
 
+    # Генерируем сессионный токен и CSRF-токен
     token = generate_token(user["name"])
-    csrf_token = generate_csrf_token()
+    csrf = generate_csrf_token()
 
     resp = make_response(jsonify({
         "name": user["name"],
         "avatar": user["avatar"],
         "isAdmin": user["isAdmin"],
         "lives": user["lives"],
-        "csrf_token": csrf_token   # отдаём CSRF-токен в теле, чтобы фронтенд сохранил в localStorage
+        "csrf_token": csrf
     }))
 
-    resp.set_cookie("auth_token", value=token, max_age=TOKEN_EXPIRY_HOURS*3600,
-                    httponly=True, secure=True, samesite="Strict", path="/")
-    resp.set_cookie("csrf_token", value=csrf_token, max_age=TOKEN_EXPIRY_HOURS*3600,
-                    httponly=False, secure=True, samesite="Strict", path="/")  # не httpOnly, чтобы JS мог читать
+    # Основная сессионная кука (httpOnly, Secure, SameSite=Strict)
+    resp.set_cookie(
+        "auth_token",
+        value=token,
+        max_age=TOKEN_EXPIRY_HOURS * 3600,
+        httponly=True,
+        secure=True,
+        samesite="Strict",
+        path="/"
+    )
+
+    # CSRF-кука (не httpOnly, чтобы JS мог прочитать, но мы храним и в localStorage)
+    resp.set_cookie(
+        "csrf_token",
+        value=csrf,
+        max_age=TOKEN_EXPIRY_HOURS * 3600,
+        httponly=False,
+        secure=True,
+        samesite="Strict",
+        path="/"
+    )
 
     return resp
 
@@ -228,7 +265,7 @@ def logout():
     return resp
 
 # ─────────────────────────────────────────────
-#  API: ПОЛЬЗОВАТЕЛИ (защищено)
+#  API: ПОЛЬЗОВАТЕЛИ (без паролей)
 # ─────────────────────────────────────────────
 @app.route("/api/lives")
 @require_auth
@@ -243,7 +280,7 @@ def get_lives():
 @require_csrf
 def update_lives(name):
     if rate_limit("lives_update"):
-        return jsonify({"error": "Слишком много запросов"}), 429
+        return jsonify({"error": "Слишком много запросов. Подождите."}), 429
 
     data = load_data()
     user = next((u for u in data["users"] if u["name"] == name), None)
@@ -265,6 +302,23 @@ def update_lives(name):
     return jsonify({"name": user["name"], "lives": user["lives"]})
 
 # ─────────────────────────────────────────────
+#  API: ПРОФИЛЬ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ (для восстановления сессии)
+# ─────────────────────────────────────────────
+@app.route("/api/me")
+@require_auth
+def me():
+    data = load_data()
+    user = next((u for u in data["users"] if u["name"] == request.current_user), None)
+    if not user:
+        return jsonify({"error": "Пользователь не найден"}), 404
+    return jsonify({
+        "name": user["name"],
+        "avatar": user["avatar"],
+        "isAdmin": user["isAdmin"],
+        "lives": user["lives"]
+    })
+
+# ─────────────────────────────────────────────
 #  API: НОВОСТИ
 # ─────────────────────────────────────────────
 @app.route("/api/news")
@@ -279,7 +333,7 @@ def get_news():
 @require_csrf
 def add_news():
     if rate_limit("news_add"):
-        return jsonify({"error": "Слишком часто"}), 429
+        return jsonify({"error": "Слишком часто добавляете новости."}), 429
 
     body = request.json
     title = body.get("title", "").strip()
@@ -339,6 +393,6 @@ def delete_news(news_id):
 #  ЗАПУСК
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    load_tokens()
+    load_tokens()   # восстанавливаем сессии после перезапуска
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
